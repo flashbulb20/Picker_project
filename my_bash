@@ -1,0 +1,39 @@
+#.bashrc에 내용 추가
+
+run_node() {
+    if [ "$#" -ne 3 ]; then
+        echo "[Error] 3 arguments are required."
+        echo "Usage: run_node <PKG_NAME> <NODE_NAME> <ROBOT_NUM>"
+        return 1
+    fi
+    ros2 run "$1" "$2" --ros-args -r __ns:=/robot"$3"
+}
+
+run_tf_node() {
+    if [ "$#" -ne 3 ]; then
+        echo "[Error]: 3 arguments are required."
+        echo "Usage: run_tf_node <PKG_NAME> <NODE_NAME> <ROBOT_NUM>"
+        return 1
+    fi
+    ros2 run "$1" "$2" --ros-args -r __ns:=/robot"$3" -r /tf:=/robot"$3"/tf -r /tf_static:=/robot"$3"/tf_static
+}
+
+my_gitpull() {
+    if [ -z "$1" ]; then
+        echo "[Error]: Branch name is required."
+        echo "Usage: my_gitpull <BRANCH>"
+        return 1
+    fi
+    echo "[Info] Fetch/pulling from $1..."
+    git checkout "$1" && git pull origin "$1";
+}
+
+my_gitpush() {
+    if [ "$#" -ne 2 ]; then
+        echo "[Error] 2 arguments are required."
+        echo "Usage: my_gitpush <BRANCH> <COMMIT_MSG>"
+        return 1
+    fi
+    echo "[Info] Pushing '$2' to '$1'..."
+    git checkout "$1" && git add . && git commit -m "$2" && git push origin "$1"
+}
