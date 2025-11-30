@@ -24,6 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'avoid_something = final_project.avoid_something:main'
         ],
     },
 )
