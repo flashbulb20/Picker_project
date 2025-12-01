@@ -9,6 +9,3 @@ move_label.py
 my_data
 tracker_data
 tracker
-
-# Ignore all checkpoint files
-*.pt
