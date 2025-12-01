@@ -61,7 +61,7 @@ class SafetyMonitor(Node):
         if count == 0: return
 
         # 전방 각도
-        fov_ratio = 45 / 360
+        fov_ratio = 40 / 360
         split_idx = int(count * fov_ratio) 
         half_idx = split_idx // 2
         
@@ -243,7 +243,7 @@ def main():
     # =========================================================
     # Phase 2
     # =========================================================
-    goal_2 = navigator.getPoseStamped([-6.38, 1.8], TurtleBot4Directions.SOUTH)
+    goal_2 = navigator.getPoseStamped([-6.12, 0.86], TurtleBot4Directions.SOUTH)
     set_nav2_params(0.1, 0.05, 0.1)
     
     print("🐢 정밀 모드...", flush=True)
@@ -251,7 +251,7 @@ def main():
         status = drive_smart(goal_2, arrival_radius=0.05, strict_mode=True)
         if status == "SUCCESS": 
             print("🎉 최종 완료!", flush=True)
-            nudge_robot(0.05)
+            nudge_robot(0.1)
             break
         elif status == "RETRY": continue
         else: print("❌ 최종 실패.", flush=True); rclpy.shutdown(); return
@@ -262,7 +262,7 @@ def main():
     print("\n=== [Phase 3] 물체 감지 시작 ===", flush=True)
     
     # 이미지가 들어올 때까지 잠깐 대기 (카메라 안정화)
-    time.sleep(2.0)
+    time.sleep(3.0)
     
     # 여기서 탐지 함수 호출!
     box_count = safety_node.detect_and_count()
