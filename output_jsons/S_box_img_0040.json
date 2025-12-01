@@ -1,0 +1,25 @@
+{
+    "S_box_img_0040.jpg27333": {
+        "filename": "S_box_img_0040.jpg",
+        "size": 27333,
+        "regions": [
+            {
+                "shape_attributes": {
+                    "name": "point",
+                    "cx": 135,
+                    "cy": 225
+                },
+                "region_attributes": {}
+            },
+            {
+                "shape_attributes": {
+                    "name": "point",
+                    "cx": 137,
+                    "cy": 255
+                },
+                "region_attributes": {}
+            }
+        ],
+        "file_attributes": {}
+    }
+}
