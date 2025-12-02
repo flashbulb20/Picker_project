@@ -57,7 +57,7 @@ class DepthToMap(Node):
         # ▶ YOLO가 그린 이미지를 퍼블리시할 토픽
         self.yolo_image_pub = self.create_publisher(
             Image,
-            'AMR_yolo',
+            'image_yolo',
             self.qos_image
         )
 
@@ -69,7 +69,7 @@ class DepthToMap(Node):
         )
 
         # ▶ 추적/탐색 파라미터
-        self.follow_distance = 2.0
+        self.follow_distance = 1.1
         self.k_v = 0.8
         self.k_w = 1.2
         self.max_linear_speed = 0.25
@@ -77,7 +77,7 @@ class DepthToMap(Node):
 
         # 🔹 도리도리 방지용 데드존
         self.dist_deadband = 0.05   # m, 목표 거리 ±10cm 이내면 전진/후진 안 함
-        self.angle_deadband = 0.15  # 정규화된 에러(화면 절반 기준 5%) 이하면 회전 안 함
+        self.angle_deadband = 0.17  # 정규화된 에러(화면 절반 기준 17%) 이하면 회전 안 함
 
         self.lost_timeout = 1.0
         self.search_angular_speed = 0.5
@@ -248,13 +248,21 @@ class DepthToMap(Node):
             target_dist = None
 
             # 🔹 confidence 기준값
+                        # 🔹 confidence 기준값
             MIN_CONF = 0.9
 
             best_box = None
-            best_conf = 0.0  # 👈 9.0 말고 0.0으로 (최고값 찾기용)
+            best_conf = 0.0  # 최고 conf 찾기용
 
+            # 1) target_class 중에서 conf 가장 높은 박스 찾기
             for (x1, y1, x2, y2, name, conf) in boxes:
-                # 시각화용 박스는 계속 그려줌 (원하면 아래 if에 MIN_CONF 넣어서 필터 가능)
+                if name == self.target_class and conf > best_conf:
+                    best_conf = conf
+                    best_box = (x1, y1, x2, y2, name, conf)
+
+            # 2) best_box만 시각화 (원하면 MIN_CONF 조건도 같이)
+            if best_box is not None and best_conf >= MIN_CONF:
+                x1, y1, x2, y2, name, conf = best_box
                 cv2.rectangle(rgb_display, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.putText(
                     rgb_display,
@@ -266,10 +274,6 @@ class DepthToMap(Node):
                     2
                 )
 
-                # 🔹 target_class 중에서 가장 confidence 높은 박스 선택
-                if name == self.target_class and conf > best_conf:
-                    best_conf = conf
-                    best_box = (x1, y1, x2, y2, name, conf)
 
             # rqt용 YOLO 이미지 퍼블리시
             img_msg = self.bridge.cv2_to_imgmsg(rgb_display, encoding='bgr8')
@@ -281,7 +285,9 @@ class DepthToMap(Node):
             if best_box is not None and best_conf >= MIN_CONF and depth is not None:
                 x1, y1, x2, y2, name, conf = best_box
                 cx = int((x1 + x2) / 2)
-                cy = int((y1 + y2) / 2)
+                # cy = int((y1 + y2) / 2)
+                cy = int(y2 - (y2 - y1) * 0.05)
+
 
                 if 0 <= cy < depth.shape[0] and 0 <= cx < depth.shape[1]:
                     z = float(depth[cy, cx]) / 1000.0
