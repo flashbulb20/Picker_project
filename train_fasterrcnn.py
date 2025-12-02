@@ -152,7 +152,7 @@ def train():
     label_dir = "/home/rokey/box_count/box_training/train/labels"
 
     dataset = YoloBoxDataset(img_dir, label_dir, transforms=T.ToTensor())
-    data_loader = DataLoader(dataset, batch_size=32, shuffle=True,
+    data_loader = DataLoader(dataset, batch_size=2, shuffle=True,
                              num_workers=4, collate_fn=collate_fn)
 
     model = get_model(2)
