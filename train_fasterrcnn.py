@@ -152,15 +152,15 @@ def train():
     label_dir = "/home/rokey/box_count/box_training/train/labels"
 
     dataset = YoloBoxDataset(img_dir, label_dir, transforms=T.ToTensor())
-    data_loader = DataLoader(dataset, batch_size=2, shuffle=True,
+    data_loader = DataLoader(dataset, batch_size=32, shuffle=True,
                              num_workers=4, collate_fn=collate_fn)
 
     model = get_model(2)
     model.to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
 
-    num_epochs = 20
+    num_epochs = 50
 
     # CSV 파일 생성
     csv_path = "results.csv"
