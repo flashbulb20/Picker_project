@@ -11,56 +11,50 @@ from cv_bridge import CvBridge
 from turtlebot4_navigation.turtlebot4_navigator import TurtleBot4Navigator, TurtleBot4Directions
 from ultralytics import YOLO
 
-import numpy as np
-if not hasattr(np, "float"):
-    np.float = float
-
 from tf_transformations import quaternion_from_euler
 import numpy as np
 import cv2
 import threading
 import math
-from .quad_check import draw_rotated_axis, get_quadrant
 
 
 # 웹캠에서 탐지할 객체 클래스 ID
 DETECT_TARGET = [0]  # 0: blue_car, 1: green_car
-EAST_YAW = 0.0  # map 기준 동쪽(0rad)이라고 가정
 
 # 각 사분면에 해당하는 목표 좌표 (x, y, theta)
 QUADRANT_TARGET_POSES = {
-    1: (-5.69312, 5.59361, EAST_YAW),
-    2: (-8.55142, 4.34779, EAST_YAW),
-    3: (-7.87239, 1.90992, EAST_YAW),
-    4: (-4.25377, 2.85634, EAST_YAW)
+    1: (0.00464523, 3.32853, math.pi / 2),
+    2: (-2.37742, 4.07556, 3 * math.pi / 4),
+    3: (-4.30382, 1.58606, -3 * math.pi / 4),
+    4: (-1.51404, -0.197009, -math.pi / 2)
 }
 
 
 class IntegratedRobotTracker(Node):
     def __init__(self):
         super().__init__('integrated_robot_tracker')
-        self.get_logger().info('Integrated 노드가 실행되었습니다.')
+        self.get_logger().info('[INFO] IntegratedRobotTracker 노드가 실행되었습니다.')
 
         # ===== 공통 설정 =====
         self.bridge = CvBridge()
         self.lock = threading.Lock()
 
         # ===== 웹캠 설정 (MoveRobot 파트) =====
-        self.webcam_model = YOLO('/home/rokey/hj/Picker_project/webcam_final.pt')
-        self.cap = cv2.VideoCapture('/dev/video0')
+        self.webcam_model = YOLO('/home/rokey/Picker_project/mixed_results.pt')
+        self.cap = cv2.VideoCapture(2)
         if not self.cap.isOpened():
-            self.get_logger().warn("카메라 연결 끊어짐. 다시 연결 중...")
-            self.cap.release()
-            self.cap = cv2.VideoCapture('/dev/video0')
-            raise IOError
-        
-        self.axis_angle = 40
+            self.get_logger().error("[ERROR] 웹캠을 열 수 없습니다.")
+            raise IOError("Webcam failed to open.")
 
         # 웹캠 annotated 이미지 퍼블리셔
-        self.webcam_image_publisher = self.create_publisher(Image, '/webcam/annotated_frame', 10)
+        self.webcam_image_publisher = self.create_publisher(
+            Image, '/webcam/annotated_frame', 10
+        )
 
         # Nav2 액션 클라이언트
-        self._action_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self._action_client = ActionClient(
+            self, NavigateToPose, 'navigate_to_pose'
+        )
 
         self.previous_quadrant = -1
         self.navigation_goal_handle = None
@@ -78,8 +72,9 @@ class IntegratedRobotTracker(Node):
         self.rgb_topic = f'{ns}/oakd/rgb/image_raw/compressed'
         self.info_topic = f'{ns}/oakd/rgb/camera_info'
 
-        self.oakd_yolo = YOLO('/home/rokey/hj/Picker_project/amr_final.pt')
-        self.get_logger().info("AMR YOLO 모델 로드 완료.")
+        self.get_logger().info("Loading OAK-D YOLO model...")
+        self.oakd_yolo = YOLO('/home/rokey/Picker_project/yolo_mixed.pt')
+        self.get_logger().info("OAK-D YOLO loaded.")
 
         self.target_class = "customer_b"
 
@@ -95,7 +90,7 @@ class IntegratedRobotTracker(Node):
             reliability=QoSReliabilityPolicy.BEST_EFFORT
         )
         self.oakd_yolo_image_pub = self.create_publisher(
-            Image, '/amr2/annotated_frame', self.qos_image
+            Image, 'image_yolo', self.qos_image
         )
 
         # cmd_vel 퍼블리셔
@@ -160,7 +155,7 @@ class IntegratedRobotTracker(Node):
 
         # ===== 타이머 설정 =====
         # 웹캠 검출 루프 (0.5초마다)
-        self.webcam_timer = self.create_timer(1.0, self.webcam_detection_loop)
+        self.webcam_timer = self.create_timer(0.5, self.webcam_detection_loop)
         
         # OAK-D 처리는 5초 후 시작 (TF Tree 안정화)
         self.get_logger().info("TF Tree 안정화 대기 중... 5초 후 OAK-D 활성화")
@@ -207,7 +202,10 @@ class IntegratedRobotTracker(Node):
         self.get_logger().info(f'[INFO] 새로운 목표 좌표로 이동: ({x:.2f}, {y:.2f})')
         
         # 비동기로 goal 전송 및 결과 콜백 등록
-        send_goal_future = self._action_client.send_goal_async(goal_msg)
+        send_goal_future = self._action_client.send_goal_async(
+            goal_msg,
+            feedback_callback=self.navigation_feedback_callback
+        )
         send_goal_future.add_done_callback(self.navigation_goal_response_callback)
         
         self.navigation_in_progress = True
@@ -217,12 +215,12 @@ class IntegratedRobotTracker(Node):
         """Navigation goal이 수락되었는지 확인"""
         self.navigation_goal_handle = future.result()
         if not self.navigation_goal_handle.accepted:
-            self.get_logger().warn('Navigation goal이 거부되었습니다.')
+            self.get_logger().warn('[WARN] Navigation goal이 거부되었습니다.')
             self.navigation_in_progress = False
             self.state = "WEBCAM_DETECTION"
             return
 
-        self.get_logger().info('Navigation goal이 수락되었습니다.')
+        self.get_logger().info('[INFO] Navigation goal이 수락되었습니다.')
         
         # 결과 대기
         result_future = self.navigation_goal_handle.get_result_async()
@@ -236,11 +234,11 @@ class IntegratedRobotTracker(Node):
         self.navigation_in_progress = False
         
         if status == 4:  # SUCCEEDED
-            self.get_logger().info('목표 지점 도착 완료! OAK-D 탐색 모드로 전환합니다.')
+            self.get_logger().info('[INFO] 목표 지점 도착 완료! OAK-D 탐색 모드로 전환합니다.')
             self.state = "OAKD_SEARCHING"
             self.search_start_time = None
         else:
-            self.get_logger().warn(f'Navigation 실패 (status: {status}). 웹캠 모드로 복귀.')
+            self.get_logger().warn(f'[WARN] Navigation 실패 (status: {status}). 웹캠 모드로 복귀.')
             self.state = "WEBCAM_DETECTION"
 
     def webcam_detection_loop(self):
@@ -250,33 +248,36 @@ class IntegratedRobotTracker(Node):
         
         ret, frame = self.cap.read()
         if not ret:
-            self.get_logger().warn("웹캠 프레임을 읽을 수 없습니다.")
+            self.get_logger().warn("[WARN] 웹캠 프레임을 읽을 수 없습니다.")
             return
 
         h, w = frame.shape[:2]
-        origin = (w//2, h//2)
+        frame_cx, frame_cy = w // 2, h // 2
 
-        results = self.webcam_model.predict(frame, classes=DETECT_TARGET, conf=0.5, verbose=False)
+        results = self.webcam_model.predict(
+            frame, classes=DETECT_TARGET, conf=0.5, verbose=False
+        )
         annotated_frame = frame.copy()
+        cv2.circle(annotated_frame, (frame_cx, frame_cy), 4, (0, 255, 255), -1)
 
         new_quadrant = -1
-        
+
         for r in results:
             if len(r.boxes) > 0:
                 box = r.boxes[0]
                 x1, y1, x2, y2 = [int(val) for val in box.xyxy[0].tolist()]
                 
-                cx = (x1 + x2) / 2
-                cy = (y1 + y2) / 2
+                xc = int((x1 + x2) / 2)
+                yc = int((y1 + y2) / 2)
+                new_quadrant = self.get_quadrant(xc, yc, frame_cx, frame_cy)
 
-                new_quadrant = get_quadrant((cx, cy), origin, self.axis_angle)
-
-                cv2.rectangle(annotated_frame, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 0), 2)
-                cv2.circle(annotated_frame, (int(cx), int(cy)), 3, (0, 255, 255), -1)
-                annotated_frame = draw_rotated_axis(annotated_frame, origin, self.axis_angle, axis_length=700)
-                text = f"Q{new_quadrant}"
-                cv2.putText(annotated_frame, text, (int(x1), int(y1) - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.circle(annotated_frame, (xc, yc), 4, (0, 0, 255), -1)
+                cv2.putText(
+                    annotated_frame, f'Q{new_quadrant}',
+                    (xc, yc + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2
+                )
                 break
 
         # Annotated 이미지 퍼블리시
@@ -284,26 +285,26 @@ class IntegratedRobotTracker(Node):
             ros_image_msg = self.bridge.cv2_to_imgmsg(annotated_frame, "bgr8")
             self.webcam_image_publisher.publish(ros_image_msg)
         except Exception as e:
-            self.get_logger().error(f'Webcam frame 발행 실패: {e}')
+            self.get_logger().error(f'[ERROR] Webcam frame 발행 실패: {e}')
 
         # 🔹 사분면 변경 감지 및 Navigation 중단/재시작
         # OAKD_TRACKING 상태일 때는 웹캠 명령을 무시 (OAK-D 추적 우선)
         if new_quadrant != -1 and new_quadrant != self.previous_quadrant:
             self.get_logger().info(
-                f"웹캠 사분면 변경 감지: {self.previous_quadrant} -> {new_quadrant}"
+                f"[INFO] 웹캠 사분면 변경 감지: {self.previous_quadrant} -> {new_quadrant}"
             )
             
             # OAKD_TRACKING 중이면 웹캠 명령 무시
             if self.state == "OAKD_TRACKING":
                 self.get_logger().info(
-                    "OAK-D 추적 중이므로 웹캠 사분면 변경 무시 (추적 우선)"
+                    "[INFO] OAK-D 추적 중이므로 웹캠 사분면 변경 무시 (추적 우선)"
                 )
                 # previous_quadrant는 업데이트하지 않음 (추적 끝난 후 비교를 위해)
                 return
             
             # NAVIGATING 또는 OAKD_SEARCHING 중이면 즉시 중단하고 재설정
             if self.state in ["NAVIGATING", "OAKD_SEARCHING"]:
-                self.get_logger().info("기존 동작 중단. 새로운 목표로 재설정.")
+                self.get_logger().info("[INFO] 기존 동작 중단. 새로운 목표로 재설정.")
                 # Navigation 취소
                 if self.navigation_goal_handle is not None:
                     self.navigation_goal_handle.cancel_goal_async()
@@ -334,7 +335,7 @@ class IntegratedRobotTracker(Node):
         msg_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         dt = now_sec - msg_sec
         
-        if dt > 1.0:
+        if dt > 0.5:
             self.get_logger().warn(f"Depth frame too old ({dt:.2f}s). Dropping.")
             return
 
@@ -459,7 +460,7 @@ class IntegratedRobotTracker(Node):
                 
                 # 탐색 중에서 추적으로 전환
                 if self.state == "OAKD_SEARCHING":
-                    self.get_logger().info("OAK-D에서 타겟 발견! 추적 모드로 전환")
+                    self.get_logger().info("[INFO] OAK-D에서 타겟 발견! 추적 모드로 전환")
                 
                 self.state = "OAKD_TRACKING"
                 self.search_start_time = None
@@ -475,7 +476,7 @@ class IntegratedRobotTracker(Node):
                     # 🔹 추적 중 타겟을 놓친 경우
                     if self.last_detection_time is None:
                         # 이전에도 없었으면 탐색 모드로
-                        self.get_logger().info("타겟 미발견. 탐색 모드로 전환")
+                        self.get_logger().info("[INFO] 타겟 미발견. 탐색 모드로 전환")
                         self.state = "OAKD_SEARCHING"
                         self.search_start_time = None
                         self.stop_robot()
@@ -489,14 +490,15 @@ class IntegratedRobotTracker(Node):
                             # 1~3초: 제자리 회전으로 재탐색 시도
                             if self.search_start_time is None:
                                 self.get_logger().info(
-                                    "타겟 놓침. 제자리 회전으로 재탐색 시작"
+                                    "[INFO] 타겟 놓침. 제자리 회전으로 재탐색 시작"
                                 )
                                 self.search_start_time = now
                             self.search_for_target(now)
                         else:
                             # 🔹 3초 이상: 완전히 시야를 벗어남 → 웹캠 모드로 복귀
                             self.get_logger().info(
-                                "타겟이 OAK-D 시야를 완전히 벗어남. 웹캠 모드로 복귀하여 재탐지 시작."
+                                "[INFO] 타겟이 OAK-D 시야를 완전히 벗어남. "
+                                "웹캠 모드로 복귀하여 재탐지 시작"
                             )
                             self.state = "WEBCAM_DETECTION"
                             self.stop_robot()
@@ -504,7 +506,7 @@ class IntegratedRobotTracker(Node):
                             self.search_start_time = None
 
         except Exception as e:
-            self.get_logger().warn(f"OAK-D 프레임 처리 오류: {e}")
+            self.get_logger().warn(f"OAK-D frame processing error: {e}")
         finally:
             self.yolo_running = False
 
@@ -545,7 +547,7 @@ class IntegratedRobotTracker(Node):
         """제자리에서 360도 회전하며 타겟 탐색"""
         if self.search_start_time is None:
             self.search_start_time = now
-            self.get_logger().info("OAK-D 360도 회전 탐색 시작")
+            self.get_logger().info("[INFO] OAK-D 360도 회전 탐색 시작")
 
         elapsed = (now - self.search_start_time).nanoseconds * 1e-9
 
@@ -556,7 +558,7 @@ class IntegratedRobotTracker(Node):
             self.cmd_vel_pub.publish(twist)
         else:
             self.get_logger().info(
-                "360도 탐색 완료. 타겟 미발견. 웹캠 모드로 복귀."
+                "[INFO] 360도 탐색 완료. 타겟 미발견. 웹캠 모드로 복귀."
             )
             self.state = "WEBCAM_DETECTION"
             self.stop_robot()
@@ -591,21 +593,21 @@ class IntegratedRobotTracker(Node):
         super().destroy_node()
 
 
-def main():
-    rclpy.init()
-    node = None
+def main(args=None):
+    rclpy.init(args=args)
     try:
         node = IntegratedRobotTracker()
-        rclpy.spin(node)
+        executor = MultiThreadedExecutor()
+        executor.add_node(node)
+        executor.spin()
     except IOError:
-        print("카메라 연결 실패 (IOError). 노드를 종료합니다.")
+        pass
+    except KeyboardInterrupt:
+        pass
     except Exception as e:
-        print(f"예기치 못한 오류 발생: {e}")
+        print(f"[ERROR] Main exception: {e}")
     finally:
-        if node is not None:
-            node.destroy_node()
         rclpy.shutdown()
-
 
 
 if __name__ == "__main__":
