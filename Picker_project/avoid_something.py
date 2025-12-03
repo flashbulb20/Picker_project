@@ -1,7 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from geometry_msgs.msg import Twist, PoseArray
+from geometry_msgs.msg import Twist, PoseArray, PoseStamped 
 from sensor_msgs.msg import LaserScan, Image
 from rcl_interfaces.srv import SetParameters
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
@@ -20,26 +20,20 @@ class SafetyMonitor(Node):
     def __init__(self):
         super().__init__('safety_monitor')
         
-        qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=10
-        )
+        qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=10)
         
-        # 센서 및 제어
         ns = self.get_namespace()
-        self.scan_sub = self.create_subscription(LaserScan, f'{ns}/scan', self.scan_callback, qos)
-        self.input_sub = self.create_subscription(Twist, f'/cmd_vel_input', self.input_callback, 10)
-        self.cmd_vel_pub = self.create_publisher(Twist, f'{ns}/cmd_vel', 10)
-        self.img_sub = self.create_subscription(Image, f'{ns}/oakd/rgb/preview/image_raw', self.img_callback, qos)
-        
-        # [NEW] 팀원 코드(OrderManager)와 연결되는 토픽
-        self.order_sub = self.create_subscription(PoseArray, '{ns}/box_order_goals', self.order_callback, 10)
+        prefix = "" if ns == "/" else ns
+
+        self.scan_sub = self.create_subscription(LaserScan, f'{prefix}/scan', self.scan_callback, qos)
+        self.input_sub = self.create_subscription(Twist, '/cmd_vel_input', self.input_callback, 10)
+        self.cmd_vel_pub = self.create_publisher(Twist, f'{prefix}/cmd_vel', 10)
+        self.img_sub = self.create_subscription(Image, f'{prefix}/oakd/rgb/preview/image_raw', self.img_callback, qos)
+        self.order_sub = self.create_subscription(PoseArray, f'{prefix}/box_order_goals', self.order_callback, 10)
         
         self.bridge = CvBridge()
         self.latest_cv_image = None
         
-        # YOLO 로드
         print("📦 YOLO 모델 로딩 중...", flush=True)
         try:
             self.model = YOLO("/home/rokey/rokey_ws/src/final_project/box_yolo8n.pt")
@@ -54,7 +48,6 @@ class SafetyMonitor(Node):
         self.obstacle_dir = 1.0
         self.is_sensor_active = False
         
-        # 좌표 수신 상태
         self.received_poses = []
         self.has_new_order = False
 
@@ -64,25 +57,48 @@ class SafetyMonitor(Node):
         count = len(ranges)
         if count == 0: return
 
+        # 정면 인덱스 (90도 방향이 정면인 경우)
         CENTER_RATIO = 0.25 
         center_idx = int(count * CENTER_RATIO)
-        fov_ratio = 30 / 360
-        half_width = int(count * fov_ratio / 2)
         
-        start_idx = max(0, center_idx - half_width)
-        end_idx = min(count, center_idx + half_width)
+        # ---------------------------------------------------------
+        # [1] 멈춤 판단용: 좁은 시야 (30도)
+        # ---------------------------------------------------------
+        stop_fov = 30 / 360
+        stop_width = int(count * stop_fov / 2)
+        s_start = max(0, center_idx - stop_width)
+        s_end = min(count, center_idx + stop_width)
         
-        front_ranges = ranges[start_idx : end_idx]
-        valid_ranges = [r for r in front_ranges if 0.18 < r < 1.0]
-        min_dist = min(valid_ranges) if valid_ranges else 10.0
+        stop_ranges = ranges[s_start : s_end]
+        valid_stop = [r for r in stop_ranges if 0.18 < r < 1.0]
+        min_dist = min(valid_stop) if valid_stop else 10.0
 
         self.current_dist = min_dist
         self.is_danger = (min_dist < self.emergency_dist)
+
+        # ---------------------------------------------------------
+        # [2] 회피 방향 판단용: 넓은 시야 (100도) -> 고립 방지
+        # ---------------------------------------------------------
+        steer_fov = 100 / 360
+        steer_width = int(count * steer_fov / 2)
+        w_start = max(0, center_idx - steer_width)
+        w_end = min(count, center_idx + steer_width)
         
-        mid = len(front_ranges) // 2
-        l_val = min([r for r in front_ranges[:mid] if r > 0.18], default=10.0)
-        r_val = min([r for r in front_ranges[mid:] if r > 0.18], default=10.0)
-        if r_val < l_val: self.obstacle_dir = 1.0 
+        wide_ranges = ranges[w_start : w_end]
+        
+        mid = len(wide_ranges) // 2
+        left_side = wide_ranges[:mid]
+        right_side = wide_ranges[mid:]
+        
+        # 0.18m 이하는 노이즈로 간주하고 제외한 뒤 평균 계산
+        valid_l = [r for r in left_side if r > 0.18]
+        valid_r = [r for r in right_side if r > 0.18]
+        
+        l_avg = sum(valid_l) / len(valid_l) if valid_l else 0.0
+        r_avg = sum(valid_r) / len(valid_r) if valid_r else 0.0
+        
+        # 더 넓은 쪽으로 회전
+        if l_avg > r_avg: self.obstacle_dir = 1.0 
         else: self.obstacle_dir = -1.0
 
     def img_callback(self, msg):
@@ -98,9 +114,7 @@ class SafetyMonitor(Node):
         else: final_cmd = msg
         self.cmd_vel_pub.publish(final_cmd)
 
-    # [NEW] 주문 수신 콜백
     def order_callback(self, msg):
-        # 메시지가 [박스위치, 도착지위치] 2개가 들어와야 함
         if len(msg.poses) >= 2:
             self.received_poses = msg.poses
             self.has_new_order = True
@@ -129,41 +143,75 @@ def main():
     spin_thread.start()
     
     # -------------------------------------------------------------
-    # [대기 모드] 팀원 코드(OrderManager)에서 주문이 올 때까지 대기
+    # [1] 주문 대기
     # -------------------------------------------------------------
-    print("\n🌐 [대기 중] '/robot<ns>/box_order_goals' 토픽을 기다리는 중...", flush=True)
+    print("\n🌐 [대기 중] '/box_order_goals' 토픽을 기다리는 중...", flush=True)
     while not safety_node.has_new_order:
-        time.sleep(1.0)    
+        time.sleep(1.0)     
     
-    if not navigator.getDockedStatus(): navigator.dock()
-    initial_pose = navigator.getPoseStamped([0.0, 0.0], TurtleBot4Directions.NORTH)
+    # -------------------------------------------------------------
+    # [2] Undock -> Initial Pose 설정
+    # -------------------------------------------------------------
+    if navigator.getDockedStatus(): 
+        print("🔌 도킹 해제(Undock) 중...", flush=True)
+        navigator.undock()
+    
+    ns = safety_node.get_namespace()
+    print(f"📍 [위치 초기화] Undock 완료 위치를 기준으로 좌표를 설정합니다.", flush=True)
+    
+    initial_pose = PoseStamped()
+    initial_pose.header.frame_id = 'map'
+    initial_pose.header.stamp = navigator.get_clock().now().to_msg()
+    
+    dock_prep_x = 0.0
+    dock_prep_y = 0.0
+    
+    if 'robot3' in ns:
+        initial_pose.pose.position.x = 0.008313
+        initial_pose.pose.position.y = 0.75587
+        initial_pose.pose.position.z = 0.0
+        initial_pose.pose.orientation.z = -0.61263
+        initial_pose.pose.orientation.w = 0.7903667
+        
+        dock_prep_x = 0.1
+        dock_prep_y = 0.5
+        print("🤖 Robot 3 설정 적용됨.", flush=True)
+        
+    elif 'robot2' in ns:
+        initial_pose.pose.position.x = -0.46
+        initial_pose.pose.position.y = 0.754
+        initial_pose.pose.position.z = 0.0
+        initial_pose.pose.orientation.z = -0.61263
+        initial_pose.pose.orientation.w = 0.7903667
+
+        dock_prep_x = -0.4
+        dock_prep_y = 0.5
+        print("🤖 Robot 2 설정 적용됨.", flush=True)
+    else:
+        initial_pose.pose.orientation.w = 1.0
+        print("⚠️ Unknown Robot Namespace. 기본값 사용.")
+
     navigator.setInitialPose(initial_pose)
     navigator.waitUntilNav2Active()
-    navigator.undock()
-
+    
     print("⏳ 센서 확인 중...", flush=True)
     while not safety_node.is_sensor_active: time.sleep(0.1)
     print("✅ 센서 연결됨.", flush=True)
 
-
-    
-    # 좌표 추출
+    # 미션 목표 설정
     box_pose_raw = safety_node.received_poses[0]
     room_pose_raw = safety_node.received_poses[1]
     
-    # Phase 2 목표 (박스 위치)
     target_box_x = box_pose_raw.position.x
     target_box_y = box_pose_raw.position.y
-    
-    # Phase 4 목표 (도착지)
     target_room_x = room_pose_raw.position.x
     target_room_y = room_pose_raw.position.y
     
     print(f"🚀 미션 시작! 1차목표: ({target_box_x}, {target_box_y})", flush=True)
 
-    # Nav2 파라미터 설정 클라이언트
-    ns = safety_node.get_namespace()
-    config_cli = safety_node.create_client(SetParameters, f'{ns}/controller_server/set_parameters')
+    prefix = "" if ns == "/" else ns
+    config_cli = safety_node.create_client(SetParameters, f'{prefix}/controller_server/set_parameters')
+    
     def set_nav2_params(max_speed, xy_tol, yaw_tol):
         if not config_cli.wait_for_service(timeout_sec=1.0): return
         req = SetParameters.Request()
@@ -180,10 +228,22 @@ def main():
         print(f"🚗 [{mode_str}] 이동 -> {target_pose.pose.position.x:.2f}, {target_pose.pose.position.y:.2f}", flush=True)
         
         navigator.goToPose(target_pose)
-        print("⏳ 경로 계산...", flush=True)
-        time.sleep(2.0) 
+        
+        print("⏳ 경로 계산 및 유효성 검사...", flush=True)
+        wait_start = time.time()
+        path_valid = False
+        
+        # 경로 계산 대기 (Time Filter)
+        while time.time() - wait_start < 5.0:
+            feedback = navigator.getFeedback()
+            if feedback and feedback.distance_remaining > arrival_radius:
+                path_valid = True
+                print(f"✅ 경로 확보됨 (남은 거리: {feedback.distance_remaining:.2f}m)", flush=True)
+                break
+            time.sleep(0.1)
 
         last_known_dist = float('inf')
+        start_time = time.time() # 타임 필터용
 
         while not navigator.isTaskComplete():
             if safety_node.is_danger:
@@ -195,12 +255,17 @@ def main():
                 print("🔄 회피 중...", flush=True)
                 while safety_node.is_danger:
                     twist = Twist(); twist.linear.x = 0.0
-                    twist.angular.z = 0.6 * safety_node.obstacle_dir 
+                    # [수정] 과감한 회전 (0.6 -> 1.0)
+                    twist.angular.z = 1.0 * safety_node.obstacle_dir 
                     safety_node.cmd_vel_pub.publish(twist)
                     time.sleep(0.1)
                 
-                print("✅ 재출발.", flush=True)
-                safety_node.cmd_vel_pub.publish(Twist()); time.sleep(0.5)
+                print("✅ 탈출 성공. 재출발.", flush=True)
+                # 회피 후 잠깐 전진해서 각도 굳히기
+                go_twist = Twist(); go_twist.linear.x = 0.2
+                safety_node.cmd_vel_pub.publish(go_twist); time.sleep(0.5)
+                
+                safety_node.cmd_vel_pub.publish(Twist()); time.sleep(0.1)
                 return "RETRY"
 
             feedback = navigator.getFeedback()
@@ -208,6 +273,8 @@ def main():
                 dist = feedback.distance_remaining
                 last_known_dist = dist
                 if not strict_mode and dist < arrival_radius:
+                    if path_valid and (time.time() - start_time < 3.0):
+                        continue
                     print(f"🚩 [도착] 반경 진입 ({dist:.2f}m).", flush=True)
                     navigator.cancelTask(); safety_node.cmd_vel_pub.publish(Twist())
                     return "SUCCESS"
@@ -230,10 +297,11 @@ def main():
         safety_node.cmd_vel_pub.publish(Twist())
 
     # =========================================================
-    # Phase 1: 1차 진입 (고정 좌표 사용)
+    # Phase 1: 1차 진입
     # =========================================================
-    # 1차 진입 지점은 보통 고정되어 있으므로 그대로 둠
-    goal_1 = navigator.getPoseStamped([-5.9, 0.4], TurtleBot4Directions.SOUTH)
+    safety_node.emergency_dist = 0.50 
+    # [수정 완료] -4 -> -4.0 (Float 타입 에러 해결)
+    goal_1 = navigator.getPoseStamped([1.8, -4.0], TurtleBot4Directions.EAST)
     set_nav2_params(0.31, 0.5, 3.14)
     
     while True:
@@ -243,13 +311,12 @@ def main():
         else: print("❌ 1차 실패.", flush=True); rclpy.shutdown(); return
 
     # =========================================================
-    # Phase 2: 박스 위치로 이동 (수신된 좌표 사용)
+    # Phase 2: 박스 위치
     # =========================================================
     print("📉 [접근] 안전거리 15cm로 축소.", flush=True)
     safety_node.emergency_dist = 0.15 
     
-    # [수신된 박스 좌표 사용]
-    goal_2 = navigator.getPoseStamped([target_box_x, target_box_y], TurtleBot4Directions.SOUTH)
+    goal_2 = navigator.getPoseStamped([target_box_x, target_box_y], TurtleBot4Directions.EAST)
     set_nav2_params(0.1, 0.05, 0.1)
     
     while True:
@@ -261,9 +328,7 @@ def main():
         elif status == "RETRY": continue
         else: print("❌ 도착 실패.", flush=True); rclpy.shutdown(); return
 
-    # =========================================================
-    # Phase 3: YOLO 탐지
-    # =========================================================
+    # Phase 3: YOLO
     print("\n=== [Phase 3] 물체 감지 시작 ===", flush=True)
     time.sleep(2.0)
     box_count = safety_node.detect_and_count()
@@ -272,30 +337,28 @@ def main():
     print("🔙 후진하여 거리 확보.", flush=True)
     nudge_robot(-0.25)
     print("📈 [복구] 안전거리 0.5m로 복구.", flush=True)
-    safety_node.emergency_dist = 0.40
+    safety_node.emergency_dist = 0.50
 
-    # =========================================================
-    # Phase 4: 도착지로 이동 (수신된 좌표 사용)
-    # =========================================================
+    # Phase 4: 도착지
     print("\n=== [Phase 4] 도착지로 이동 ===", flush=True)
-    # [수신된 도착지 좌표 사용]
-    goal_3 = navigator.getPoseStamped([target_room_x, target_room_y], TurtleBot4Directions.WEST)
+    goal_3 = navigator.getPoseStamped([target_room_x, target_room_y], TurtleBot4Directions.NORTH)
     set_nav2_params(0.31, 0.5, 0.5) 
 
     while True:
         status = drive_smart(goal_3, arrival_radius=0.2, strict_mode=False)
-        if status == "SUCCESS": 
-            print("✅ 2차 지점 도착 완료!", flush=True)
-            break
+        if status == "SUCCESS": print("✅ 2차 지점 도착 완료!", flush=True); break
         elif status == "RETRY": continue
         else: print("❌ 이동 실패.", flush=True); rclpy.shutdown(); return
-    time.sleep(5.0)
+    
+    time.sleep(1.0)
 
     # =========================================================
     # Phase 5: 도킹 복귀
     # =========================================================
     print("\n=== [Phase 5] 도킹 스테이션 복귀 ===", flush=True)
-    dock_pose = navigator.getPoseStamped([-0.26, -0.3], TurtleBot4Directions.NORTH)
+    print(f"📍 도킹 준비 위치: ({dock_prep_x}, {dock_prep_y})")
+    
+    dock_pose = navigator.getPoseStamped([dock_prep_x, dock_prep_y], TurtleBot4Directions.EAST)
     set_nav2_params(0.31, 0.1, 0.1)
 
     while True:
