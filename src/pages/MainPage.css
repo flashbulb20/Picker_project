@@ -1,0 +1,28 @@
+.main-container {
+  width: 100%;
+  min-height: 100vh; /* ✅ height 대신 min-height 사용 */
+  background: #1d1f27;
+  color: white;
+  text-align: center;
+  padding-top: 100px;
+  padding-bottom: 50px; /* ✅ 아래쪽 여백을 좀 더 넉넉하게 줌 */
+  
+  /* 내용이 넘칠 때를 대비해 박스 모델 설정 */
+  box-sizing: border-box; 
+}
+
+.menu-box {
+  margin-top: 50px;
+}
+
+.menu-box button {
+  margin: 10px;
+  padding: 15px 30px;
+  border: none;
+  background: #4fa3ff;
+  color: white;
+  font-size: 16px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
