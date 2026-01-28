@@ -12,6 +12,8 @@
 
 <br>
 
+[🎬 데모 영상 보러가기](https://drive.google.com/file/d/1rgOwfXtNjZ27KaW0gpJynZV6yzTcaGBK/view?usp=sharing)
+
 ## 🏪 프로젝트 시나리오 (Service Scenario)
 
 이 시스템은 복잡한 의류 매장 환경에서 직원의 반복적인 물류 업무를 자동화하기 위해 설계되었습니다.
